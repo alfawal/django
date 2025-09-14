@@ -251,3 +251,105 @@ class CacheKeyPredictabilityTest(SimpleTestCase):
         # Test utility function access
         utility_key = get_view_cache_key(viewset.list, self.request)
         self.assertEqual(cache_key, utility_key)
+
+    def test_cache_key_without_request(self):
+        """Test cache key generation without HttpRequest object."""
+        
+        class TenantViewSet:
+            @method_decorator(cache_page_with_key(60 * 60 * 2, url_path='/api/tenants/'))
+            def list(self, request, format=None):
+                return {"tenants": []}
+
+        viewset = TenantViewSet()
+        
+        # Test cache key generation without request
+        cache_key = viewset.list.get_cache_key_without_request('/api/tenants/')
+        self.assertIsInstance(cache_key, str)
+        self.assertTrue(cache_key.startswith('views.decorators.cache.cache_page.'))
+        
+        # Test with different URL paths
+        cache_key2 = viewset.list.get_cache_key_without_request('/api/tenants')
+        self.assertNotEqual(cache_key, cache_key2)
+
+    def test_cache_invalidation_without_request(self):
+        """Test cache invalidation without HttpRequest object."""
+        
+        class TenantViewSet:
+            @method_decorator(cache_page_with_key(60 * 60 * 2, url_path='/api/tenants/'))
+            def list(self, request, format=None):
+                return {"tenants": []}
+
+        viewset = TenantViewSet()
+        
+        # Test cache invalidation without request
+        count = viewset.list.invalidate_cache('/api/tenants/')
+        self.assertIsInstance(count, int)
+        
+        # Test with stored URL path
+        count2 = viewset.list.invalidate_cache()
+        self.assertIsInstance(count2, int)
+
+    def test_tenant_model_save_scenario(self):
+        """Test the specific tenant model save scenario from the user's request."""
+        
+        class TenantViewSet:
+            @method_decorator(cache_page_with_key(60 * 60 * 2, url_path='/api/tenants/'))
+            def list(self, request, format=None):
+                return {"tenants": []}
+            
+            @method_decorator(cache_page_with_key(60 * 60 * 1, url_path='/api/tenants/{pk}/'))
+            def retrieve(self, request, pk=None, format=None):
+                return {"tenant": {"id": pk}}
+
+        viewset = TenantViewSet()
+        
+        # Simulate tenant model save (no request available)
+        tenant_id = 123
+        
+        # Test list cache invalidation
+        list_count = viewset.list.invalidate_cache()
+        self.assertIsInstance(list_count, int)
+        
+        # Test specific tenant cache invalidation
+        retrieve_count = viewset.retrieve.invalidate_cache(f'/api/tenants/{tenant_id}/')
+        self.assertIsInstance(retrieve_count, int)
+        
+        # Test cache key generation for specific tenant
+        tenant_cache_key = viewset.retrieve.get_cache_key_without_request(f'/api/tenants/{tenant_id}/')
+        self.assertIsInstance(tenant_cache_key, str)
+        self.assertIn(str(tenant_id), tenant_cache_key)
+
+    def test_url_path_required_error(self):
+        """Test that url_path is required when not provided in decorator."""
+        
+        class ViewSet:
+            @method_decorator(cache_page_with_key(60 * 60 * 2))  # No url_path
+            def list(self, request, format=None):
+                return {"data": []}
+
+        viewset = ViewSet()
+        
+        # Should raise ValueError when url_path is not provided
+        with self.assertRaises(ValueError):
+            viewset.list.get_cache_key_without_request()
+
+    def test_custom_cache_key_function_without_request(self):
+        """Test custom cache key function without request."""
+        
+        def custom_cache_key_func(request, method="GET", headerlist=None, key_prefix=None):
+            return f"custom.{request.path}.{method}"
+
+        class ViewSet:
+            @method_decorator(cache_page_with_key(
+                60 * 60 * 2,
+                url_path='/api/custom/',
+                cache_key_func=custom_cache_key_func
+            ))
+            def list(self, request, format=None):
+                return {"data": []}
+
+        viewset = ViewSet()
+        
+        # Test custom cache key generation without request
+        cache_key = viewset.list.get_cache_key_without_request('/api/custom/')
+        self.assertEqual(cache_key, "custom./api/custom/.GET")

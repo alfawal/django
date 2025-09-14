@@ -28,12 +28,13 @@ def cache_page(timeout, *, cache=None, key_prefix=None):
     )
 
 
-def cache_page_with_key(timeout, *, cache=None, key_prefix=None, cache_key_func=None):
+def cache_page_with_key(timeout, *, cache=None, key_prefix=None, cache_key_func=None, url_path=None):
     """
     Enhanced cache_page decorator that provides predictable cache keys.
     
     This decorator works like cache_page but also stores a cache key generation
-    function that can be used to predict cache keys for invalidation.
+    function that can be used to predict cache keys for invalidation, even
+    without an HttpRequest object (useful for model save signals).
     
     Args:
         timeout: Cache timeout in seconds
@@ -41,9 +42,13 @@ def cache_page_with_key(timeout, *, cache=None, key_prefix=None, cache_key_func=
         key_prefix: Key prefix for cache keys
         cache_key_func: Optional function to generate cache keys. If not provided,
                        uses the default Django cache key generation.
+        url_path: Optional URL path for cache key generation without request.
+                 If provided, enables cache invalidation from model save signals.
     
-    The decorated method will have a `cache_key` attribute that can be used
-    to generate cache keys for invalidation.
+    The decorated method will have several methods for cache key generation:
+    - get_cache_key(request) - Generate cache key from HttpRequest
+    - get_cache_key_without_request(url_path) - Generate cache key without request
+    - invalidate_cache() - Invalidate all cache entries for this view
     """
     def decorator(view_func):
         # Store the cache key generation function on the view
@@ -69,6 +74,7 @@ def cache_page_with_key(timeout, *, cache=None, key_prefix=None, cache_key_func=
             'timeout': timeout,
             'cache_alias': cache,
             'key_prefix': key_prefix,
+            'url_path': url_path,
         }
         
         # Apply the original cache_page decorator
@@ -91,7 +97,76 @@ def cache_page_with_key(timeout, *, cache=None, key_prefix=None, cache_key_func=
             key_prefix = config['key_prefix']
             return view_func._cache_key_func(request, method, headerlist, key_prefix)
         
+        def get_cache_key_without_request(url_path=None, method="GET", headerlist=None, domain="localhost"):
+            """
+            Generate a cache key for this view method without requiring an HttpRequest.
+            
+            This is particularly useful for model save signals where no request is available.
+            
+            Args:
+                url_path: The URL path (uses stored url_path if not provided)
+                method: HTTP method (default: GET)
+                headerlist: List of headers to include in cache key
+                domain: Domain for the URL (default: localhost)
+                
+            Returns:
+                str: Cache key for this view
+            """
+            from django.utils.cache_keys import get_view_cache_key_without_request
+            
+            config = view_func._cache_config
+            key_prefix = config['key_prefix']
+            url_path = url_path or config['url_path']
+            
+            if not url_path:
+                raise ValueError("url_path must be provided either in decorator or method call")
+            
+            return get_view_cache_key_without_request(
+                view_func, url_path, method, headerlist, key_prefix, domain
+            )
+        
+        def invalidate_cache(url_path=None, method="GET", headerlist=None, domain="localhost"):
+            """
+            Invalidate all cache entries for this view method.
+            
+            Args:
+                url_path: The URL path (uses stored url_path if not provided)
+                method: HTTP method (default: GET)
+                headerlist: List of headers to include in cache key
+                domain: Domain for the URL (default: localhost)
+                
+            Returns:
+                int: Number of cache entries invalidated
+            """
+            from django.utils.cache_keys import invalidate_view_cache_by_pattern, get_view_cache_key_without_request
+            from django.core.cache import caches
+            from django.conf import settings
+            
+            cache = caches[view_func._cache_config.get('cache_alias', settings.CACHE_MIDDLEWARE_ALIAS)]
+            
+            # Try pattern-based invalidation first
+            count = invalidate_view_cache_by_pattern(view_func, view_func._cache_config['key_prefix'], cache)
+            
+            if count > 0:
+                return count
+            
+            # Fallback: try to invalidate using stored URL path
+            url_path = url_path or view_func._cache_config['url_path']
+            if url_path:
+                try:
+                    cache_key = get_view_cache_key_without_request(
+                        view_func, url_path, method, headerlist, 
+                        view_func._cache_config['key_prefix'], domain
+                    )
+                    return 1 if cache.delete(cache_key) else 0
+                except Exception:
+                    return 0
+            
+            return 0
+        
         cached_view.get_cache_key = get_cache_key
+        cached_view.get_cache_key_without_request = get_cache_key_without_request
+        cached_view.invalidate_cache = invalidate_cache
         
         return cached_view
     
